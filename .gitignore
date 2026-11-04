@@ -1,0 +1,28 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+
+# Ignore plan files
+*.tfplan
+*tfplan*
+
+# Terraform variable files
+terraform.tfvars
+*.auto.tfvars
+
+# Sensitive files
+*.pem
+*.key
+
+# Python functions zip files
+*.zip
+
+# My temporary files
+gitignore/
+infra.*
+test
+#chat.md
+*.drawio
+commands.txt
