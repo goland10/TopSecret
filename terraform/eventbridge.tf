@@ -16,7 +16,7 @@ resource "aws_cloudwatch_event_rule" "unauthorized_secret_read" {
     "detail-type" = ["AWS API Call via CloudTrail"]
     detail = {
       eventSource = ["secretsmanager.amazonaws.com"]
-      eventName   = ["GetSecretValue", "BatchGetSecretValue"]
+      eventName   = ["BatchGetSecretValue", "GetSecretValue"]
       requestParameters = {
         secretId = [{ wildcard = "*${local.secret_suffix}*" }]   # matches both the name and the full ARN
       }

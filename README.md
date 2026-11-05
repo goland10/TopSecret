@@ -2,9 +2,9 @@
 
 ## Overview
 
-This projects demonstarates how to protect, audit and alarm about TopSecret tampering attempts.
+This projects demonstrates how to protect, audit and alarm about TopSecret tampering attempts.
 
-TopSecret protects a single AWS Secrets Manager secret (`<secret_name>/monitored`) and alerts the security team by email whenever anyone other than the two authorized Lambda functions reads it, tampers with it, or tampers with its KMS key. A resource policy blocks everyone else, and EventBridge rules plus a CloudWatch alarm turn CloudTrail activity into SNS email alerts. The alert chain is guarded by a dead-letter queue, so an attacker who disables the KMS key still cannot silence it. The whole stack is deployed with Terraform in `eu-west-1` and supports separate `test` and `prod` environments.
+Same thing about tampering with the Customer-managed key the secret is encrypted with.
 
 ## Architecture
 
@@ -132,51 +132,53 @@ Before deploying, replace `alert_email` with your own mailbox and replace or emp
 
 ### 3. Deploy
 
+`backend.tf` uses a fixed state key. 
+To deploy `test` and `prod` side by side from the same bucket, give each its own key: `terraform init -reconfigure -backend-config="key=<env>/terraform.tfstate"`.
+
 ```bash
 cd terraform
 
 terraform init
+terraform validate
 terraform plan  -var-file=envs/test.tfvars -out=tfplan
 terraform apply tfplan
 ```
 
 Use `envs/prod.tfvars` for production.
 
-After the apply:
+## Test Deployment
 
-1. **Confirm both subscription emails** from AWS (one for `<project_name>-alert`, one for `<project_name>-dlq-alert`). Alerts are not delivered until each subscription is confirmed.
-2. Check that they are confirmed:
+1. Set these variables once. Take the values from your tfvars file.
+
    ```bash
-   aws sns list-subscriptions --query "Subscriptions[?contains(TopicArn,'<project_name>')].[TopicArn,SubscriptionArn]" --output table
+   export AWS_REGION=eu-west-1
+   PROJECT_NAME="top-secret" 
+   SECRET_NAME="Secret01" 
+   SECRET_ID="$SECRET_NAME/monitored" 
+   KMS_ALIAS="alias/${PROJECT_NAME}"
+   KEY_ID=$(aws kms describe-key --key-id "$KMS_ALIAS" --query KeyMetadata.KeyId --output text)
+   ```
+
+2. Go to your email and Confirm both subscription emails from AWS for The `alert` and `dlq-alert` SNS topics.
+
+   Alerts are not delivered until each subscription is confirmed.
+
+3. Check that they are confirmed:
+   ```bash
+   aws sns list-subscriptions --query "Subscriptions[?contains(TopicArn,'${PROJECT_NAME}')].[TopicArn,SubscriptionArn]" --output table
    ```
    `PendingConfirmation` means the email hasn't been confirmed yet.
 
-> **Notes**
-> - The alert rules exempt only the two Lambda roles, so actions by the deploying identity (for example, the policy being created during the first apply) can also generate alert emails.
-> - `backend.tf` uses a fixed state key. To deploy `test` and `prod` side by side from the same bucket, give each its own key: `terraform init -reconfigure -backend-config="key=<env>/terraform.tfstate"`.
+Email alerts trigered by EventBridge rules normally arrive within 5 seconds. 
 
-### 4. Test setup
+Email alerts trigered by Alarms (rotation burst, DLQ) take about 2 minutes. Run the tests **in this order** so that any alert can be attributed to the step that caused it.
 
-Set these variables once. Take `PROJECT_NAME` and the secret name from your tfvars file.
+### Test 1: Lambda functions do NOT trigger any alert
 
-```bash
-export AWS_REGION=eu-west-1
-PROJECT_NAME="top-secret"                 # project_name in your tfvars
-SECRET_ID="Secret01/monitored"            # <secret_name>/monitored
-KMS_ALIAS="alias/${PROJECT_NAME}"
-KEY_ID=$(aws kms describe-key --key-id "$KMS_ALIAS" --query KeyMetadata.KeyId --output text)
-```
-
-Email alerts normally arrive within about a minute for EventBridge rules. The alarms (rotation burst, DLQ) take about 5 to 10 minutes. Run the tests **in this order** so that any alert can be attributed to the step that caused it.
-
-> Run these in `test`. Some steps temporarily weaken protection on the secret or the key, and each says how to restore it.
-
-#### 4.1 Lambda functions do NOT trigger any alert
-
-Run this first. Wait for any emails caused by the deployment to arrive, then start from a clean baseline:
+Run this first. Wait for any emails to arrive, then start from a clean baseline:
 
 ```bash
-# Alarms start in OK state and the DLQ is empty
+# Verify Alarms start in OK state and the DLQ is empty
 aws cloudwatch describe-alarms \
   --alarm-names "${PROJECT_NAME}-rotation-burst" "${PROJECT_NAME}-eventbridge-dlq-not-empty" \
   --query "MetricAlarms[].[AlarmName,StateValue]" --output table
@@ -207,13 +209,12 @@ aws cloudtrail lookup-events \
 
 You should see `${PROJECT_NAME}-lambda-reader` and `${PROJECT_NAME}-lambda-rotator` entries, and no alert for them.
 
-#### 4.2 Rule `unauthorized-secret-read`
+### Test 2: Rule `unauthorized-secret-read`
 
 | Test | Command | Expected |
 |---|---|---|
-| **Denied read** by a principal that is not on the allow list (use a second IAM user or role profile) | `aws secretsmanager get-secret-value --secret-id "$SECRET_ID" --profile <other-profile>` | `AccessDeniedException` **and** an email: `Unauthorized secret read ALERT: GetSecretValue on <secret> by <arn> from <ip> at <time>` |
 | **Allowed** read by the deployer or an `extra_secret_reader_arns` principal | `aws secretsmanager get-secret-value --secret-id "$SECRET_ID" --query VersionId` | The call succeeds, and the same alert email arrives (only the two Lambdas are exempt). The query keeps the secret value off your screen. |
-| **Batch** read | `aws secretsmanager batch-get-secret-value --secret-id-list "$SECRET_ID" --query "SecretValues[].VersionId"` | Alert email with `BatchGetSecretValue` |
+| **Batch** read | Store a new secret: `aws secretsmanager create-secret   --name "anotherone/monitored"   --secret-string "anotherone"   --region $AWS_REGION` then run:  `aws secretsmanager batch-get-secret-value --secret-id-list "$SECRET_ID" "anotherone/monitored" --query "SecretValues[].VersionId"` then delete it: `aws secretsmanager delete-secret --secret-id "anotherone/monitored" --force-delete-without-recovery --region eu-west-1` | Alert email with `GetSecretValue` since it comes before `BatchGetSecretValue` |
 
 #### 4.3 Rule `secret-tampering`
 
